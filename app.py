@@ -7,6 +7,7 @@ import pickle
 import pandas as pd
 from datetime import datetime, timedelta
 from collections import defaultdict
+import re
 
 # Définir le fichier client_secrets.json contenant l'ID client OAuth 2.0
 CLIENT_SECRETS_FILE = "client_secrets.json"
@@ -75,6 +76,9 @@ def main():
     # Saisie du filtre device
     device_category = st.selectbox('Sélectionnez la catégorie de device', ['Tous', 'MOBILE', 'DESKTOP', 'TABLET'])
 
+    # Champ pour la regex des mots-clés à exclure
+    exclude_regex = st.text_input('Regex des mots-clés à exclure (optionnel)')
+
     if st.button("Analyser les données"):
         # Préparation de la requête
         request = {
@@ -107,8 +111,12 @@ def main():
         df['position'] = df['position'].round(2)
         df.sort_values('clicks', inplace=True, ascending=False)
 
+        # Filtrer les mots-clés avec la regex si elle est fournie
+        if exclude_regex:
+            df = df[~df['query'].str.contains(exclude_regex, regex=True, na=False)]
+        
         # Afficher les résultats dans un tableau
-        st.write("Données de la Search Console :")
+        st.write("Données de la Search Console (après filtrage) :")
         st.dataframe(df)
 
         # Ajouter un bouton de téléchargement
