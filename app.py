@@ -1,92 +1,97 @@
 import streamlit as st
-import pandas as pd
-from collections import defaultdict
-import requests
-from bs4 import BeautifulSoup
-import datetime
-from google.oauth2 import service_account
+from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+import google.auth.transport.requests
+import os
+import pickle
+import pandas as pd
+from datetime import datetime, timedelta
+from collections import defaultdict
 
-# Authentification à l'API Google Search Console
-CLIENT_SECRETS_FILE = "client_secrets.json"  # Assurez-vous que ce fichier est dans le même dossier que votre script
+# Définir le fichier client_secrets.json contenant l'ID client OAuth 2.0
+CLIENT_SECRETS_FILE = "client_secrets.json"
 SCOPES = ['https://www.googleapis.com/auth/webmasters.readonly']
-credentials = service_account.Credentials.from_service_account_file(CLIENT_SECRETS_FILE, scopes=SCOPES)
 
-def get_search_console_service():
-    return build('searchconsole', 'v1', credentials=credentials)
+# Fonction pour gérer l'authentification OAuth 2.0
+def authenticate_user():
+    # Création d'un objet Flow pour gérer le flux OAuth 2.0
+    flow = Flow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE, scopes=SCOPES,
+        redirect_uri="http://localhost:8501")  # URL de redirection pour Streamlit local
 
-# Fonction pour exécuter la requête vers l'API Google Search Console
+    # Générer l'URL d'authentification OAuth 2.0
+    authorization_url, state = flow.authorization_url(prompt='consent')
+
+    # Afficher le lien pour l'utilisateur pour qu'il se connecte via Google
+    st.write("Veuillez vous authentifier via Google pour continuer :")
+    st.markdown(f"[Se connecter via Google]({authorization_url})")
+
+    # Récupérer le code d'autorisation après la connexion
+    code = st.text_input("Entrez le code d'autorisation ici")
+
+    if code:
+        # Échanger le code d'autorisation contre un jeton d'accès
+        flow.fetch_token(code=code)
+        credentials = flow.credentials
+
+        # Sauvegarder les informations d'authentification pour les réutiliser
+        with open('token.pkl', 'wb') as token_file:
+            pickle.dump(credentials, token_file)
+
+        st.success("Authentification réussie !")
+
+# Fonction pour charger les credentials sauvegardés
+def load_credentials():
+    if os.path.exists('token.pkl'):
+        with open('token.pkl', 'rb') as token_file:
+            credentials = pickle.load(token_file)
+            return credentials
+    return None
+
+# Fonction pour exécuter la requête vers Google Search Console
 def execute_request(service, property_uri, request):
     return service.searchanalytics().query(siteUrl=property_uri, body=request).execute()
 
-# Fonction pour récupérer les meta titres et descriptions
-def get_meta(url):
-    try:
-        page = requests.get(url, timeout=5)
-        soup = BeautifulSoup(page.content, 'html.parser')
-        title = soup.find('title').get_text() if soup.find('title') else 'No Title'
-        meta = soup.select('meta[name="description"]')
-        meta_description = meta[0].attrs["content"] if meta else 'No Meta Description'
-        return title, meta_description
-    except Exception as e:
-        return 'Error Fetching', 'Error Fetching'
-
-# Fonction principale de cannibalisation
-def process_cannibalization(df):
-    SERP_results = 8  # Limite de position pour la première page
-    branded_queries = 'brand|vrand|b rand...'  # Remplacer par vos termes de marque
-
-    # Filtrage des positions hors première page
-    df_canibalized = df[df['position'] > SERP_results]
-    
-    # Exclure les requêtes contenant des termes de marque
-    df_canibalized = df_canibalized[~df_canibalized['query'].str.contains(branded_queries, regex=True)]
-    
-    # Conserver les requêtes dupliquées (cannibalisation)
-    df_canibalized = df_canibalized[df_canibalized.duplicated(subset=['query'], keep=False)]
-    
-    # Réinitialiser l'index
-    df_canibalized.set_index(['query'], inplace=True)
-    df_canibalized.sort_index(inplace=True)
-    df_canibalized.reset_index(inplace=True)
-
-    # Ajouter les titres et meta descriptions
-    df_canibalized['title'], df_canibalized['meta'] = zip(*df_canibalized['page'].apply(get_meta))
-    
-    return df_canibalized
-
 # Interface Streamlit
 def main():
-    st.title('Analyse de Cannibalisation Google Search Console')
+    st.title("Analyse de Cannibalisation Google Search Console")
 
-    # Sélection des dates
-    start_date = st.date_input('Date de début', value=datetime.date.today() - datetime.timedelta(days=90))
-    end_date = st.date_input('Date de fin', value=datetime.date.today())
+    # Authentifier l'utilisateur si ce n'est pas déjà fait
+    credentials = load_credentials()
+    if not credentials:
+        authenticate_user()
+        return
+
+    # Charger l'API Search Console
+    service = build('searchconsole', 'v1', credentials=credentials)
+
+    # Sélecteur de dates pour la période à analyser
+    start_date = st.date_input('Date de début', value=datetime.today() - timedelta(days=90))
+    end_date = st.date_input('Date de fin', value=datetime.today())
 
     # Saisie de l'URL du site
-    site = st.text_input('Entrez l\'URL du site', 'https://example.com')
+    site_url = st.text_input('Entrez l\'URL du site', 'https://example.com')
 
-    # Saisie du filtre par device
+    # Saisie du filtre device
     device_category = st.selectbox('Sélectionnez la catégorie de device', ['Tous', 'MOBILE', 'DESKTOP', 'TABLET'])
 
-    # Bouton pour exécuter la requête
-    if st.button('Analyser les données'):
+    if st.button("Analyser les données"):
+        # Préparation de la requête
         request = {
             'startDate': start_date.strftime("%Y-%m-%d"),
-            'endDate': end_date.strftime('%Y-%m-%d'),
+            'endDate': end_date.strftime("%Y-%m-%d"),
             'dimensions': ['page', 'query'],
-            'rowLimit': 25000  # Limite de 25.000 URLs
+            'rowLimit': 25000
         }
 
-        # Appliquer le filtre device
+        # Appliquer un filtre sur le device si sélectionné
         if device_category != 'Tous':
             request['dimensionFilterGroups'] = [{'filters': [{'dimension': 'device', 'expression': device_category}]}]
 
-        # Exécuter la requête
-        webmasters_service = get_search_console_service()
-        response = execute_request(webmasters_service, site, request)
+        # Exécution de la requête
+        response = execute_request(service, site_url, request)
 
-        # Traiter les résultats
+        # Traiter les données reçues
         scDict = defaultdict(list)
         for row in response.get('rows', []):
             scDict['page'].append(row['keys'][0])
@@ -106,21 +111,9 @@ def main():
         st.write("Données de la Search Console :")
         st.dataframe(df)
 
-        # Traiter la cannibalisation
-        df_cannibalized = process_cannibalization(df)
-
-        # Afficher le DataFrame des résultats cannibalisés
-        st.write("Résultats de cannibalisation :")
-        st.dataframe(df_cannibalized)
-
-        # Bouton de téléchargement
-        csv = df_cannibalized.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="Télécharger les données",
-            data=csv,
-            file_name='cannibalisation_data.csv',
-            mime='text/csv',
-        )
+        # Ajouter un bouton de téléchargement
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button("Télécharger les résultats", data=csv, file_name="search_console_data.csv", mime='text/csv')
 
 if __name__ == "__main__":
     main()
