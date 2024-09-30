@@ -1,94 +1,119 @@
-
-# Fichier : app.py
 import streamlit as st
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
-from google.auth.transport.requests import Request
-import pickle
+import google.auth.transport.requests
 import os
+import pickle
 import pandas as pd
 from datetime import datetime, timedelta
+from collections import defaultdict
 
-# Configuration des paramètres OAuth 2.0
-CLIENT_SECRETS_FILE = "client_secrets.json"  # Remplace avec ton fichier JSON de Client ID
+# Définir le fichier client_secrets.json contenant l'ID client OAuth 2.0
+CLIENT_SECRETS_FILE = "client_secrets.json"
 SCOPES = ['https://www.googleapis.com/auth/webmasters.readonly']
 
 # Fonction pour gérer l'authentification OAuth 2.0
 def authenticate_user():
-    if 'credentials' not in st.session_state:
-        flow = Flow.from_client_secrets_file(
-            CLIENT_SECRETS_FILE, 
-            scopes=SCOPES,
-            redirect_uri="http://localhost:8501")
+    # Création d'un objet Flow pour gérer le flux OAuth 2.0
+    flow = Flow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE, scopes=SCOPES,
+        redirect_uri="http://localhost:8501")  # URL de redirection pour Streamlit local
 
-        auth_url, _ = flow.authorization_url(prompt='consent')
-        st.write("Veuillez vous authentifier via Google pour continuer :")
-        st.markdown(f"[Se connecter via Google]({auth_url})")
-        code = st.text_input('Code d\'autorisation')
+    # Générer l'URL d'authentification OAuth 2.0
+    authorization_url, state = flow.authorization_url(prompt='consent')
 
-        if code:
-            flow.fetch_token(code=code)
-            credentials = flow.credentials
+    # Afficher le lien pour l'utilisateur pour qu'il se connecte via Google
+    st.write("Veuillez vous authentifier via Google pour continuer :")
+    st.markdown(f"[Se connecter via Google]({authorization_url})")
 
-            # Stocker les informations d'authentification dans la session
-            st.session_state.credentials = credentials
+    # Récupérer le code d'autorisation après la connexion
+    code = st.text_input("Entrez le code d'autorisation ici")
 
-# Fonction pour créer une instance du service Google Search Console
-def get_search_console_service():
-    credentials = st.session_state.credentials
-    if credentials:
-        return build('searchconsole', 'v1', credentials=credentials)
+    if code:
+        # Échanger le code d'autorisation contre un jeton d'accès
+        flow.fetch_token(code=code)
+        credentials = flow.credentials
 
-# Obtenir les données des 3 derniers mois
-def get_search_console_data(site_url):
-    service = get_search_console_service()
+        # Sauvegarder les informations d'authentification pour les réutiliser
+        with open('token.pkl', 'wb') as token_file:
+            pickle.dump(credentials, token_file)
 
-    # Calculer les dates de début et de fin (3 derniers mois)
-    end_date = datetime.today().date()
-    start_date = end_date - timedelta(days=90)
+        st.success("Authentification réussie !")
 
-    # Effectuer une requête sur l'API Search Console
-    request = {
-        'startDate': str(start_date),
-        'endDate': str(end_date),
-        'dimensions': ['query'],
-        'rowLimit': 1000,  # Limite du nombre de mots-clés
-        'fields': 'rows/clicks,rows/keys'
-    }
+# Fonction pour charger les credentials sauvegardés
+def load_credentials():
+    if os.path.exists('token.pkl'):
+        with open('token.pkl', 'rb') as token_file:
+            credentials = pickle.load(token_file)
+            return credentials
+    return None
 
-    response = service.searchanalytics().query(siteUrl=site_url, body=request).execute()
-    return response.get('rows', [])
-
-# Extraire les mots-clés avec le plus de clics
-def get_top_keywords(data, top_n=5):
-    df = pd.DataFrame(data)
-    df['clicks'] = df['clicks'].astype(int)
-    df = df.sort_values(by='clicks', ascending=False)
-    return df.head(top_n)
+# Fonction pour exécuter la requête vers Google Search Console
+def execute_request(service, property_uri, request):
+    return service.searchanalytics().query(siteUrl=property_uri, body=request).execute()
 
 # Interface Streamlit
 def main():
-    st.title('Top 5 Mots-Clés sur Google Search Console')
+    st.title("Analyse de Cannibalisation Google Search Console")
 
-    # Authentification de l'utilisateur
-    if 'credentials' not in st.session_state:
+    # Authentifier l'utilisateur si ce n'est pas déjà fait
+    credentials = load_credentials()
+    if not credentials:
         authenticate_user()
-    else:
-        # Si l'utilisateur est authentifié, lui permettre de saisir l'URL du site
-        site_url = st.text_input('Entrez l\'URL du site', 'https://example.com')
+        return
 
-        if st.button('Afficher les résultats'):
-            st.write(f'Données des 3 derniers mois pour le site: {site_url}')
-            
-            # Récupérer les données de la Search Console
-            data = get_search_console_data(site_url)
+    # Charger l'API Search Console
+    service = build('searchconsole', 'v1', credentials=credentials)
 
-            if data:
-                # Trier et afficher les 5 mots-clés avec le plus de clics
-                top_keywords = get_top_keywords(data)
-                st.dataframe(top_keywords)
-            else:
-                st.write("Aucune donnée trouvée")
+    # Sélecteur de dates pour la période à analyser
+    start_date = st.date_input('Date de début', value=datetime.today() - timedelta(days=90))
+    end_date = st.date_input('Date de fin', value=datetime.today())
+
+    # Saisie de l'URL du site
+    site_url = st.text_input('Entrez l\'URL du site', 'https://example.com')
+
+    # Saisie du filtre device
+    device_category = st.selectbox('Sélectionnez la catégorie de device', ['Tous', 'MOBILE', 'DESKTOP', 'TABLET'])
+
+    if st.button("Analyser les données"):
+        # Préparation de la requête
+        request = {
+            'startDate': start_date.strftime("%Y-%m-%d"),
+            'endDate': end_date.strftime("%Y-%m-%d"),
+            'dimensions': ['page', 'query'],
+            'rowLimit': 25000
+        }
+
+        # Appliquer un filtre sur le device si sélectionné
+        if device_category != 'Tous':
+            request['dimensionFilterGroups'] = [{'filters': [{'dimension': 'device', 'expression': device_category}]}]
+
+        # Exécution de la requête
+        response = execute_request(service, site_url, request)
+
+        # Traiter les données reçues
+        scDict = defaultdict(list)
+        for row in response.get('rows', []):
+            scDict['page'].append(row['keys'][0])
+            scDict['query'].append(row['keys'][1])
+            scDict['clicks'].append(row['clicks'])
+            scDict['ctr'].append(row['ctr'] * 100)  # Convertir en pourcentage
+            scDict['impressions'].append(row['impressions'])
+            scDict['position'].append(row['position'])
+
+        df = pd.DataFrame(data=scDict)
+        df['clicks'] = df['clicks'].astype('int')
+        df['impressions'] = df['impressions'].astype('int')
+        df['position'] = df['position'].round(2)
+        df.sort_values('clicks', inplace=True, ascending=False)
+
+        # Afficher les résultats dans un tableau
+        st.write("Données de la Search Console :")
+        st.dataframe(df)
+
+        # Ajouter un bouton de téléchargement
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button("Télécharger les résultats", data=csv, file_name="search_console_data.csv", mime='text/csv')
 
 if __name__ == "__main__":
     main()
