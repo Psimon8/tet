@@ -64,7 +64,7 @@ def main():
             'startDate': start_date.strftime("%Y-%m-%d"),
             'endDate': end_date.strftime("%Y-%m-%d"),
             'dimensions': ['page', 'query'],
-            'rowLimit': 1000  # Limiter à 1000 lignes pour éviter un timeout
+            'rowLimit': 10000  # Limiter à 1000 lignes pour éviter un timeout
         }
 
         if device_category != 'Tous':
