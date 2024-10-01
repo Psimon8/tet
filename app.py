@@ -2,6 +2,8 @@ import streamlit as st
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from google.auth.transport.requests import Request
+import httplib2
 import os
 import pickle
 import pandas as pd
@@ -35,10 +37,17 @@ def load_credentials():
             return credentials
     return None
 
-# Fonction avec timeout
-def execute_request(service, property_uri, request, timeout=60):
+# Création d'un client HTTP personnalisé avec timeout
+def create_http_with_timeout(timeout=60):
+    http = httplib2.Http(timeout=timeout)
+    return http
+
+# Fonction pour exécuter la requête vers Google Search Console avec un client HTTP personnalisé
+def execute_request(service, property_uri, request):
     try:
-        return service.searchanalytics().query(siteUrl=property_uri, body=request).execute(timeout=timeout)
+        # Utiliser le client HTTP personnalisé avec timeout
+        http = create_http_with_timeout()
+        return service.searchanalytics().query(siteUrl=property_uri, body=request).execute(http=http)
     except HttpError as error:
         st.error(f"Une erreur s'est produite lors de l'exécution de la requête : {error}")
     except Exception as e:
@@ -52,7 +61,9 @@ def main():
         authenticate_user()
         return
 
-    service = build('searchconsole', 'v1', credentials=credentials)
+    # Charger l'API Search Console avec un client HTTP personnalisé
+    service = build('searchconsole', 'v1', credentials=credentials, cache_discovery=False)
+
     start_date = st.date_input('Date de début', value=datetime.today() - timedelta(days=90))
     end_date = st.date_input('Date de fin', value=datetime.today())
     site_url = st.text_input('Entrez l\'URL du site', 'https://example.com')
@@ -64,7 +75,7 @@ def main():
             'startDate': start_date.strftime("%Y-%m-%d"),
             'endDate': end_date.strftime("%Y-%m-%d"),
             'dimensions': ['page', 'query'],
-            'rowLimit': 10000  # Limiter à 1000 lignes pour éviter un timeout
+            'rowLimit': 1000  # Limiter à 1000 lignes pour éviter un timeout
         }
 
         if device_category != 'Tous':
